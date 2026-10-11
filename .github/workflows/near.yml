@@ -1,0 +1,36 @@
+name: NEAR valuacion
+
+on:
+  schedule:
+    - cron: "0 12 * * *"   # 12:00 UTC = 09:00 Argentina, todos los días
+  workflow_dispatch:        # botón para correrlo a mano (manda mail siempre)
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      - name: Correr bot
+        run: python near_valuacion.py
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+
+      - name: Guardar estado
+        run: |
+          git config user.name "near-bot"
+          git config user.email "near-bot@users.noreply.github.com"
+          git add estado.json
+          git diff --cached --quiet || (git commit -m "estado" && git push)
