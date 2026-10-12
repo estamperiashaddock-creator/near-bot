@@ -3,7 +3,10 @@
 Uso local: python near_valuacion.py --force   (sin credenciales solo imprime y guarda ultimo_mail.html)
 Variables: EMAIL_USER, EMAIL_PASS (contraseña de aplicación de Gmail), EMAIL_TO, FORCE=1
 """
-import os, sys, json, time, smtplib, statistics
+import os, sys, json, time, re, hashlib, smtplib, statistics
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
+from html import escape
 import datetime as dt
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -28,6 +31,20 @@ TABLA = [
     ("2027 (estimado)", None, None, INFLACION_PCT),
 ]
 PROX_UNLOCK = None  # ej: "15/11/2026 (1.2% del circulante)"
+
+# Palabras clave para clasificar titulares (automático, puede equivocarse)
+BUENAS = [r"\betf", r"\bapprov", r"\baprob", r"\baprueba", r"\bpartner", r"\balianza", r"\blaunch",
+          r"\blanz", r"\blist(s|ed|ing)\b", r"\blistad", r"\bintegra", r"\bupgrade", r"\brecord",
+          r"\bsurge", r"\brally", r"\badopt", r"\binvest", r"\bgrant", r"\bmainnet", r"\bbullish",
+          r"\bsube\b", r"\bsuben\b"]
+MALAS = [r"\bhack", r"\bexploit", r"\battack", r"\bataque", r"\blawsuit", r"\bdemanda", r"\bsec\b",
+         r"\bdelist", r"\bdeslist", r"\boutage", r"\bhalt", r"\bfraud", r"\bestafa", r"\bban(s|ned)?\b",
+         r"\bprohib", r"\bcrash", r"\bplunge", r"\bdrop", r"\bsell-?off", r"\bbearish", r"\breject",
+         r"\brechaz", r"\binvestigat", r"\bcae\b", r"\bcaen\b", r"\bcaída"]
+# Noticias "clave": las que justifican un mail aparte
+CLAVE = [r"\betf", r"\bhack", r"\bexploit", r"\bsec\b", r"\blawsuit", r"\bdemanda", r"\bdelist",
+         r"\bdeslist", r"\blist(s|ed|ing)\b", r"\blistad", r"\boutage", r"\bhalt", r"\bpartner",
+         r"\balianza", r"\bapprov", r"\baprob", r"\baprueba"]
 # ================================================================
 
 
@@ -89,6 +106,102 @@ def usuarios():
         return None, None
 
 
+def get_text(url, params=None):
+    for _ in range(3):
+        try:
+            r = requests.get(url, params=params, timeout=30, headers={"User-Agent": "Mozilla/5.0 near-bot"})
+            r.raise_for_status()
+            return r.content
+        except Exception:
+            time.sleep(3)
+    return None
+
+
+def clasificar(t):
+    s = sum(1 for k in BUENAS if re.search(k, t, re.I)) - sum(1 for k in MALAS if re.search(k, t, re.I))
+    clave = any(re.search(k, t, re.I) for k in CLAVE)
+    return ("🟢" if s > 0 else "🔴" if s < 0 else "⚪"), clave
+
+
+def buscar_noticias(ahora):
+    consultas = [
+        {"q": '"NEAR Protocol" when:7d', "hl": "es-419", "gl": "AR", "ceid": "AR:es-419"},
+        {"q": '"NEAR Protocol" OR "NEAR token" when:7d', "hl": "en-US", "gl": "US", "ceid": "US:en"},
+    ]
+    vistos, out = set(), []
+    for q in consultas:
+        raw = get_text("https://news.google.com/rss/search", q)
+        if not raw:
+            continue
+        try:
+            root = ET.fromstring(raw)
+        except Exception:
+            continue
+        for it in root.iter("item"):
+            titulo = (it.findtext("title") or "").strip()
+            link = (it.findtext("link") or "").strip()
+            fuente = (it.findtext("source") or "").strip()
+            if not titulo or not link or not re.search(r"\bNEAR\b|Near Protocol", titulo):
+                continue
+            try:
+                d = dt.datetime.utcfromtimestamp(parsedate_to_datetime(it.findtext("pubDate")).timestamp())
+            except Exception:
+                d = None
+            if d and (ahora - d).days > 7:
+                continue
+            if fuente and titulo.endswith(" - " + fuente):
+                titulo = titulo[:-len(fuente) - 3]
+            nid = hashlib.md5(titulo.lower().encode("utf-8")).hexdigest()[:12]
+            if nid in vistos:
+                continue
+            vistos.add(nid)
+            emo, clave = clasificar(titulo)
+            out.append({"id": nid, "titulo": titulo, "link": link, "fuente": fuente or "s/f",
+                        "fecha": d.strftime("%d/%m") if d else "", "ts": d.timestamp() if d else 0,
+                        "emo": emo, "clave": clave})
+    out.sort(key=lambda n: (not n["clave"], -n["ts"]))
+    return out
+
+
+def html_noticias(items, nota=True):
+    if not items:
+        return "<p>No se encontraron noticias de NEAR en los últimos 7 días.</p>"
+    out = ""
+    for n in items[:5]:
+        out += ('<p style="margin:6px 0">%s <a href="%s">%s</a> <small style="color:#666">(%s, %s%s)</small></p>'
+                % (n["emo"], escape(n["link"], quote=True), escape(n["titulo"]), escape(n["fuente"]), n["fecha"],
+                   " · IMPORTANTE" if n["clave"] else ""))
+    if nota:
+        out += ('<p style="font-size:12px;color:#666">(🟢 suena positiva, 🔴 suena negativa, ⚪ neutra o dudosa. '
+                'La clasificación es automática por palabras clave y puede equivocarse: leé la nota antes de decidir.)</p>')
+    return out
+
+
+def enviar_mail(asunto, html):
+    user, pw, to = os.environ.get("EMAIL_USER"), os.environ.get("EMAIL_PASS"), os.environ.get("EMAIL_TO")
+    if not (user and pw and to):
+        print("Sin credenciales: mail guardado en ultimo_mail.html.\nAsunto:", asunto)
+        return
+    msg = MIMEMultipart("alternative")
+    msg["Subject"], msg["From"], msg["To"] = asunto, user, to
+    msg.attach(MIMEText("Abrí este mail en un lector que muestre HTML.", "plain", "utf-8"))
+    msg.attach(MIMEText(html, "html", "utf-8"))
+    user, pw, to = user.strip(), pw.replace(" ", "").strip(), to.strip()
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60) as s:
+            s.login(user, pw)
+            s.sendmail(user, [to], msg.as_string())
+    except Exception as e:
+        print("Falló el 465 (%s); pruebo el 587 con STARTTLS" % e)
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=60) as s:
+            s.ehlo()
+            s.starttls()
+            s.ehlo()
+            s.login(user, pw)
+            s.sendmail(user, [to], msg.as_string())
+    print("Mail enviado:", asunto)
+
+
 # ---------- formato ----------
 def usd(x):
     if x is None:
@@ -146,12 +259,19 @@ def puntaje(desv, fees_c, stab_c, neta, commits):
     return int(round(p))
 
 
-def veredicto(p):
+def veredicto(p, desv=None, bull=None, price=None):
     if p >= 65:
-        return "ACUMULAR", "🟢", "NEAR cotiza con descuento frente a su valor justo estimado y los fundamentos acompañan."
-    if p >= 40:
-        return "MANTENER", "🟡", "NEAR está cerca de su valor justo; sin urgencia para comprar ni vender."
-    return "ESPERAR", "🔴", "NEAR cotiza caro o los fundamentos se debilitaron; conviene esperar un mejor momento."
+        v = ("ACUMULAR", "🟢", "NEAR cotiza con descuento frente a su valor justo estimado y los fundamentos acompañan.")
+    elif p >= 40:
+        v = ("MANTENER", "🟡", "NEAR está cerca de su valor justo; sin urgencia para comprar ni vender.")
+    else:
+        v = ("ESPERAR", "🔴", "NEAR cotiza caro o los fundamentos se debilitaron; conviene esperar un mejor momento.")
+    if desv is not None and desv > 50:
+        extra = " (incluso por encima del escenario optimista)" if (bull and price and price > bull) else ""
+        return ("ESPERAR", "🔴", "Ojo: NEAR cotiza %.0f%% más caro que su valor justo estimado%s. No es buen momento para comprar más." % (desv, extra))
+    if desv is not None and desv > 30 and v[0] == "ACUMULAR":
+        return ("MANTENER", "🟡", "NEAR está algo más caro que su valor justo; no conviene sumar más por ahora.")
+    return v
 
 
 def cargar_estado():
@@ -223,7 +343,7 @@ def main():
 
     # ---- puntaje y veredicto ----
     p = puntaje(desv, fees_c30, st_c, neta_hoy, commits)
-    verd, emo, frase = veredicto(p)
+    verd, emo, frase = veredicto(p, desv, bull, price)
     cambio = bool(est.get("veredicto")) and est["veredicto"] != verd
 
     # ---- alertas ----
@@ -241,37 +361,65 @@ def main():
     if cambio:
         al.append("Cambió el veredicto: de %s a %s." % (est["veredicto"], verd))
 
+    # ---- noticias ----
+    noticias = buscar_noticias(ahora)
+    vistas = est.get("noticias_vistas")
+    primera_vez = vistas is None
+    vistas = vistas or []
+    clave_nuevas = [n for n in noticias if n["clave"] and n["id"] not in vistas]
+    n_b = sum(1 for n in noticias if n["emo"] == "🟢")
+    n_m = sum(1 for n in noticias if n["emo"] == "🔴")
+    news_html = html_noticias(noticias)
+
     # ---- resumen de la semana ----
-    if neta_hoy is None or est.get("neta") is None:
-        q_txt = "primera medición" if neta_hoy is not None else ND
+    if neta_hoy is None:
+        q_txt = ND
+    elif est.get("neta") is None:
+        q_txt = "primera medición (todavía no hay una medición anterior para comparar)"
     else:
         dq = neta_hoy - est["neta"]
-        q_txt = "mejoró" if dq < -0.1 else "empeoró" if dq > 0.1 else "sin cambios"
+        q_txt = ("mejoró" if dq < -0.1 else "empeoró" if dq > 0.1 else "sin cambios") + " (vs la medición anterior)"
+    sm = lambda t: ' <small style="color:#666">(' + t + ")</small>"
+    us_extra = " ⚠️ caída muy brusca: puede ser un error de la fuente de datos" if (us_c is not None and us_c < -50) else ""
     resumen = [
-        "💲 Precio: <b>%s</b> (%s en la semana)" % (px(price), pct(ch7)),
-        "📈 Fees (7 días): <b>%s</b>" % pct(fees_c7),
-        "👥 Usuarios activos (7 días): <b>%s</b>" % pct(us_c),
-        "🔥 Quema neta: <b>%s</b>" % q_txt,
-        "🔓 Unlocks: <b>%s</b>" % (PROX_UNLOCK or "sin datos cargados"),
+        "💲 Precio: <b>%s</b> (%s en los últimos 7 días)" % (px(price), pct(ch7)),
+        "📈 Fees: <b>%s</b> en 7 días" % pct(fees_c7) + sm("lo que los usuarios pagaron por usar la red; si sube, hay más uso"),
+        "👥 Usuarios activos: <b>%s</b> en 7 días" % pct(us_c) + sm("cuentas que usaron la red; si sube, hay más gente" + us_extra),
+        "🔥 Quema neta: <b>%s</b>" % q_txt + sm("monedas nuevas que se crean menos las que se destruyen"),
+        "🔓 Unlocks: <b>%s</b>" % (PROX_UNLOCK or "sin fechas cargadas todavía") + sm("fechas en que se liberan monedas bloqueadas de insiders; si se liberan muchas pueden venderlas y presionar el precio"),
+        "📰 Noticias: <b>%d</b> en 7 días (🟢 %d, 🔴 %d)" % (len(noticias), n_b, n_m) + sm("titulares de NEAR en medios; abajo están los links"),
         "🚨 Alertas: <b>%s</b>" % (str(len(al)) + " (ver abajo)" if al else "ninguna"),
     ]
 
     # ---- tablas ----
+    ex = lambda t, e: t + '<br><small style="color:#666">(' + e + ")</small>"
+    if desv is None:
+        d_txt = ND
+    elif desv >= 0:
+        d_txt = "%s (hoy cotiza %.0f%% MÁS CARO que el valor justo base)" % (pct(desv), desv)
+    else:
+        d_txt = "%s (hoy cotiza %.0f%% MÁS BARATO que el valor justo base)" % (pct(desv), -desv)
     t_precio = [
-        ["Precio hoy", px(price)],
-        ["Justo bajista", px(bear)],
-        ["Justo base", px(base)],
-        ["Justo alcista", px(bull)],
-        ["Desvío vs base", pct(desv)],
+        [ex("Precio hoy", "lo que cuesta NEAR ahora"), px(price)],
+        [ex("Justo bajista", "escenario pesimista"), px(bear)],
+        [ex("Justo base", "escenario normal"), px(base)],
+        [ex("Justo alcista", "escenario optimista"), px(bull)],
+        [ex("Desvío vs base", "cuánto se aleja el precio de hoy del valor justo normal"), d_txt],
     ]
     t_clave = [
-        ["Fees anualizados", usd(fees_anual), "%s %s (30d)" % (fl(fees_c30), pct(fees_c30))],
-        ["Quema neta (inflación − quema)", pln(neta_hoy), "quema %s" % pln(burn)],
-        ["Stablecoins en la red", usd(st_now), "%s %s (30d)" % (fl(st_c), pct(st_c))],
-        ["Usuarios activos", ND if us_now is None else format(us_now, ",.0f"), "%s %s (7d)" % (fl(us_c), pct(us_c))],
-        ["Commits GitHub (4 sem)", ND if commits is None else str(commits), ""],
+        [ex("Fees anualizados", "lo que los usuarios pagaron por usar la red en los últimos 30 días, proyectado a un año; es como la facturación de NEAR"),
+         usd(fees_anual), "%s %s en 30 días" % (fl(fees_c30), pct(fees_c30))],
+        [ex("Quema neta", "monedas nuevas que crea la red por año menos las que destruye con las comisiones; si da positivo hay cada vez más monedas y cada una vale un poco menos"),
+         pln(neta_hoy), "se destruye %s por año" % pln(burn)],
+        [ex("Stablecoins en la red", "dólares digitales dentro de NEAR; más es más uso real"),
+         usd(st_now), "%s %s en 30 días" % (fl(st_c), pct(st_c))],
+        [ex("Usuarios activos", "cuentas distintas que usaron la red en el día"),
+         ND if us_now is None else format(us_now, ",.0f"), "%s %s en 7 días" % (fl(us_c), pct(us_c))],
+        [ex("Actividad de desarrolladores", "cantidad de actualizaciones al código en 4 semanas; indica si siguen trabajando en el proyecto"),
+         ND if commits is None else str(commits), ""],
     ]
-    comp = "P/S de NEAR: <b>%s</b> vs mediana %s: <b>%s</b>" % (
+    comp = ("P/S de NEAR: <b>%s</b> vs mediana de %s: <b>%s</b><br><small style=\"color:#666\">(P/S = cuántas veces la facturación anual de la red entra en su valor de mercado. "
+            "Más alto = más caro. Si NEAR está por encima de la mediana, el mercado la valora más que a sus competidoras por lo que factura.)</small>") % (
         ND if ps_near is None else "%.0f" % ps_near, "/".join(PEERS_NAMES()),
         ND if ps_med is None else "%.0f" % ps_med)
     filas = []
@@ -285,19 +433,21 @@ def main():
     html = """<div style="font-family:Arial,sans-serif;max-width:640px;margin:auto;color:#222;line-height:1.5">
 <p>¡Hola %s! Este es tu resumen de NEAR 👋</p>
 <div style="background:#fff8e1;border-radius:8px;padding:12px 16px">
-<b>⚡ Lo que pasó esta semana (de un vistazo)</b><br>%s<br><br><b>👉 En una frase:</b> %s</div>
+<b>⚡ Lo que pasó en los últimos 7 días (de un vistazo)</b><br><small style="color:#666">(son 7 días corridos hasta hoy, no la semana de lunes a viernes)</small><br>%s<br><br><b>👉 En una frase:</b> %s</div>
 <h2>%s Veredicto: %s (%d/100)</h2><p>%s</p>
+<p style="font-size:12px;color:#666">(El puntaje de 0 a 100 mezcla si NEAR está cara o barata, el uso de la red, la quema de monedas y la actividad de los desarrolladores. Desde 65 = acumular, de 40 a 64 = mantener, menos de 40 = esperar. Si está muy cara frente a su valor justo, el veredicto baja aunque el puntaje sea alto.)</p>
 <h3>💰 Precio vs valor justo</h3>%s
 <h3>📊 Números clave</h3>%s
 <h3>⚖️ Comparación con la competencia</h3><p>%s</p>
 <h3>🏢 Insiders y liberación de tokens</h3>%s
-<p style="font-size:12px;color:#666">Inflación cargada a mano (verificar). Lo marcado "estimado" es proyección. Los datos "no disponible" faltan en la fuente o no se cargaron.</p>
+<p style="font-size:12px;color:#666">Qué significa cada columna: <b>%% en insiders</b> (parte de todas las monedas que tienen el equipo y los inversores tempranos), <b>Liberado</b> (monedas que se desbloquean ese año y ya pueden vender), <b>Inflación</b> (monedas nuevas que crea la red por año), <b>Quema</b> (monedas que se destruyen con las comisiones), <b>Dilución neta</b> (inflación menos quema: si es positiva hay cada vez más monedas y cada una vale un poco menos). La inflación está cargada a mano (verificar). Lo marcado "estimado" es proyección y "no disponible" quiere decir que falta el dato.</p>
+<h3>📰 Noticias de la semana</h3>%s
 <h3>🚨 Alertas</h3><p>%s</p>
 <p style="font-size:12px;color:#666">Fuentes: CoinGecko, DefiLlama, NearBlocks. Datos al %s. Valor justo = fees anualizados × P/S de SOL, AVAX, APT y SUI (cuartiles: bajista/base/alcista). Es una guía, no una recomendación de inversión.</p>
 <p>¡Que tengas una excelente semana!</p></div>""" % (
         NOMBRE, "<br>".join(resumen), frase, emo, verd, p, frase,
         tabla_html(["", ""], t_precio), tabla_html(["Métrica", "Valor", "Tendencia"], t_clave),
-        comp, t_ins,
+        comp, t_ins, news_html,
         "<br>".join("• " + a for a in al) if al else "Esta semana no pasó nada fuera de lo normal ✅",
         ahora_txt)
 
@@ -306,38 +456,29 @@ def main():
         asunto = "⚠️ Cambió el veredicto – " + asunto
 
     # ---- guardar estado ----
-    est.update({"veredicto": verd, "puntaje": p, "neta": neta_hoy, "fecha": ahora_txt})
+    est.update({"veredicto": verd, "puntaje": p, "neta": neta_hoy, "fecha": ahora_txt,
+                "noticias_vistas": (vistas + [n["id"] for n in noticias if n["id"] not in vistas])[-300:]})
     with open(ESTADO, "w", encoding="utf-8") as fh:
         json.dump(est, fh, ensure_ascii=False, indent=2)
     with open("ultimo_mail.html", "w", encoding="utf-8") as fh:
         fh.write(html)
 
     # ---- enviar ----
-    if not (force or cambio or ahora.weekday() == 0):
-        print("Hoy no toca mail (no es lunes y no cambió el veredicto). Veredicto:", verd, p)
-        return
-    user, pw, to = os.environ.get("EMAIL_USER"), os.environ.get("EMAIL_PASS"), os.environ.get("EMAIL_TO")
-    if not (user and pw and to):
-        print("Sin credenciales: mail guardado en ultimo_mail.html.\nAsunto:", asunto)
-        return
-    msg = MIMEMultipart("alternative")
-    msg["Subject"], msg["From"], msg["To"] = asunto, user, to
-    msg.attach(MIMEText("Abrí este mail en un lector que muestre HTML.", "plain", "utf-8"))
-    msg.attach(MIMEText(html, "html", "utf-8"))
-    user, pw, to = user.strip(), pw.replace(" ", "").strip(), to.strip()
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60) as s:
-            s.login(user, pw)
-            s.sendmail(user, [to], msg.as_string())
-    except Exception as e:
-        print("Falló el 465 (%s); pruebo el 587 con STARTTLS" % e)
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=60) as s:
-            s.ehlo()
-            s.starttls()
-            s.ehlo()
-            s.login(user, pw)
-            s.sendmail(user, [to], msg.as_string())
-    print("Mail enviado:", asunto)
+    semanal = force or cambio or ahora.weekday() == 0
+    if semanal:
+        enviar_mail(asunto, html)
+    elif clave_nuevas and not primera_vez:
+        n0 = clave_nuevas[0]
+        asunto_n = "%s NEAR | Noticia importante: %s" % (n0["emo"] if n0["emo"] != "⚪" else "⚠️", n0["titulo"][:80])
+        html_n = ('<div style="font-family:Arial,sans-serif;max-width:640px;margin:auto;color:#222;line-height:1.5">'
+                  '<p>¡Hola %s! Salió una noticia importante sobre NEAR 📰</p>%s'
+                  '<p style="font-size:12px;color:#666">Aviso automático. Veredicto actual: %s %s (%d/100). '
+                  'No es una recomendación de inversión.</p></div>') % (NOMBRE, html_noticias(clave_nuevas), emo, verd, p)
+        with open("ultimo_mail_noticia.html", "w", encoding="utf-8") as fh:
+            fh.write(html_n)
+        enviar_mail(asunto_n, html_n)
+    else:
+        print("Hoy no toca mail (no es lunes, no cambió el veredicto y no hay noticias clave nuevas). Veredicto:", verd, p)
 
 
 def PEERS_NAMES():
