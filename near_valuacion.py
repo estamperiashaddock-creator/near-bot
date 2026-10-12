@@ -324,9 +324,19 @@ def main():
     msg["Subject"], msg["From"], msg["To"] = asunto, user, to
     msg.attach(MIMEText("Abrí este mail en un lector que muestre HTML.", "plain", "utf-8"))
     msg.attach(MIMEText(html, "html", "utf-8"))
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-        s.login(user, pw)
-        s.sendmail(user, [to], msg.as_string())
+    user, pw, to = user.strip(), pw.replace(" ", "").strip(), to.strip()
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60) as s:
+            s.login(user, pw)
+            s.sendmail(user, [to], msg.as_string())
+    except Exception as e:
+        print("Falló el 465 (%s); pruebo el 587 con STARTTLS" % e)
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=60) as s:
+            s.ehlo()
+            s.starttls()
+            s.ehlo()
+            s.login(user, pw)
+            s.sendmail(user, [to], msg.as_string())
     print("Mail enviado:", asunto)
 
 
