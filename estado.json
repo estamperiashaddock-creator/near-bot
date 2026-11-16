@@ -1,21 +1,9 @@
 {
   "veredicto": "ESPERAR",
   "puntaje": 32,
-  "neta": 1.9423249585032893,
-  "fecha": "15/11/2026 18:06 UTC",
+  "neta": 1.9564268222466565,
+  "fecha": "16/11/2026 21:22 UTC",
   "noticias_vistas": [
-    "b9622f6f9174",
-    "e5f9ff1f57cf",
-    "1dcb36c111b6",
-    "0c395c2d61e9",
-    "9d4234189f4e",
-    "60e391c4df5a",
-    "163a79bfcafb",
-    "c12e4b827185",
-    "fb8cfc83ca94",
-    "bb211f3ec2e4",
-    "d9c7189fc14b",
-    "c498f5b48281",
     "c9d3426eebbc",
     "a85f08ffb30d",
     "30ebe811fb87",
@@ -303,6 +291,18 @@
     "ec985412e658",
     "e997340dc03c",
     "c05bdcfb8cbe",
-    "da83c212fa38"
+    "da83c212fa38",
+    "a7d68375473d",
+    "566c5f441eec",
+    "83529068284c",
+    "e839c0197654",
+    "cf5bc0c8dd2b",
+    "d6f189c685f1",
+    "2c5c2d98973a",
+    "6724b4b9e371",
+    "2f9c34e7e363",
+    "de581d6eedb0",
+    "b7a588c21bf8",
+    "efdf3df10668"
   ]
 }
