@@ -1,18 +1,9 @@
 {
   "veredicto": "MANTENER",
-  "puntaje": 60,
-  "neta": 1.892796405338111,
-  "fecha": "24/11/2026 21:39 UTC",
+  "puntaje": 52,
+  "neta": 1.939445504023324,
+  "fecha": "25/11/2026 20:47 UTC",
   "noticias_vistas": [
-    "590c1022b8ae",
-    "1c444fcf2f23",
-    "a4f8ca4110e9",
-    "9969552f1424",
-    "eefacf300a8a",
-    "5faa703dff28",
-    "caade578b916",
-    "1c4cdc9280ac",
-    "3651c125c0f4",
     "3f8bc798afb3",
     "2ec1fda2e1ee",
     "d7d47df87f90",
@@ -303,6 +294,15 @@
     "8cb4114e0985",
     "71b6b0e9859f",
     "bdd446f5af13",
-    "1ef303b5ca24"
+    "1ef303b5ca24",
+    "4b425050816c",
+    "ca691d18ad8b",
+    "1874c1ca92c8",
+    "cbf0172df9a0",
+    "e2b1bca1a93e",
+    "e0a62b895af4",
+    "f37d2ed6cd9f",
+    "1cb45d18738c",
+    "bb8137cc93d2"
   ]
 }
